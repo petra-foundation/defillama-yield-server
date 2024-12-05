@@ -29,30 +29,88 @@ const CONFIG = {
     TIME_BETWEEN_BLOCK: 12,
     STAKING_ADDRESS: '0x80497049b005Fd236591c3CD431DBD6E06eB1A31',
   },
-  arbitrum: {
-    ENDPOINT: `${ENDPOINT_BASE}/arbitrum`,
-    SDEX_TOKEN_ADDRESS: '0xabD587f2607542723b17f14d00d99b987C29b074',
-    FARMING_RANGE_ADDRESS: '0x53D165DF0414bD02E91747775450934BF2257f69',
-    TIME_BETWEEN_BLOCK: 0.25,
-  },
-  polygon: {
-    ENDPOINT: `${ENDPOINT_BASE}/polygon`,
-    SDEX_TOKEN_ADDRESS: '0x6899fAcE15c14348E1759371049ab64A3a06bFA6',
-    FARMING_RANGE_ADDRESS: '0x7DB73A1e526db36c40e508b09428420c1fA8e46b',
-    TIME_BETWEEN_BLOCK: 2.2,
-  },
-  bsc: {
-    ENDPOINT: `${ENDPOINT_BASE}/bsc`,
-    SDEX_TOKEN_ADDRESS: '0xFdc66A08B0d0Dc44c17bbd471B88f49F50CdD20F',
-    FARMING_RANGE_ADDRESS: '0xb891Aeb2130805171796644a2af76Fc7Ff25a0b9',
-    TIME_BETWEEN_BLOCK: 3,
-  },
-  base: {
-    ENDPOINT: `${ENDPOINT_BASE}/base`,
-    SDEX_TOKEN_ADDRESS: '0xFd4330b0312fdEEC6d4225075b82E00493FF2e3f',
-    FARMING_RANGE_ADDRESS: '0xa5D378c05192E3f1F365D6298921879C4D51c5a3',
-    TIME_BETWEEN_BLOCK: 2,
-  },
+  // arbitrum: {
+  //   ENDPOINT: `${ENDPOINT_BASE}/arbitrum`,
+  //   SDEX_TOKEN_ADDRESS: '0xabD587f2607542723b17f14d00d99b987C29b074',
+  //   FARMING_RANGE_ADDRESS: '0x53D165DF0414bD02E91747775450934BF2257f69',
+  //   TIME_BETWEEN_BLOCK: 0.25,
+  // },
+  // polygon: {
+  //   ENDPOINT: `${ENDPOINT_BASE}/polygon`,
+  //   SDEX_TOKEN_ADDRESS: '0x6899fAcE15c14348E1759371049ab64A3a06bFA6',
+  //   FARMING_RANGE_ADDRESS: '0x7DB73A1e526db36c40e508b09428420c1fA8e46b',
+  //   TIME_BETWEEN_BLOCK: 2.2,
+  // },
+  // bsc: {
+  //   ENDPOINT: `${ENDPOINT_BASE}/bsc`,
+  //   SDEX_TOKEN_ADDRESS: '0xFdc66A08B0d0Dc44c17bbd471B88f49F50CdD20F',
+  //   FARMING_RANGE_ADDRESS: '0xb891Aeb2130805171796644a2af76Fc7Ff25a0b9',
+  //   TIME_BETWEEN_BLOCK: 3,
+  // },
+  // base: {
+  //   ENDPOINT: `${ENDPOINT_BASE}/base`,
+  //   SDEX_TOKEN_ADDRESS: '0xFd4330b0312fdEEC6d4225075b82E00493FF2e3f',
+  //   FARMING_RANGE_ADDRESS: '0xa5D378c05192E3f1F365D6298921879C4D51c5a3',
+  //   TIME_BETWEEN_BLOCK: 2,
+  // },
+};
+
+const EXCEPTIONS = {
+  ethereum: [
+    {
+      tokenAddress: SUSDN_TOKEN_ADDRESS,
+      symbol: 'sUSDN',
+      customHandler: async ({
+        chainString,
+        block,
+        farmsWithRewards,
+        sdexPrice,
+        BLOCKS_PER_YEAR,
+        STAKING_ADDRESS,
+      }) => {
+        const prices = (
+          await utils.getData(
+            `https://coins.llama.fi/prices/current/${chainString}:${SUSDN_TOKEN_ADDRESS}`
+          )
+        ).coins;
+        const susdnPrice =
+          prices[`${chainString}:${SUSDN_TOKEN_ADDRESS}`]?.price || 0;
+        const totalSupply =
+          (
+            await sdk.api.abi.call({
+              target: SUSDN_TOKEN_ADDRESS,
+              abi: 'erc20:totalSupply',
+              chain: chainString,
+            })
+          ).output / 1e18;
+
+        const rewardApy = campaignRewardAPY(
+          farmsWithRewards.find(
+            (farm) =>
+              farm.pairAddress.toLowerCase() ===
+              SUSDN_TOKEN_ADDRESS.toLowerCase()
+          ),
+          block,
+          susdnPrice,
+          sdexPrice,
+          BLOCKS_PER_YEAR,
+          STAKING_ADDRESS
+        );
+
+        const sUSDeApy = await sUSDeApy(susdnPrice);
+        const apyBase = rewardApy + sUSDeApy;
+
+        return {
+          pool: SUSDN_TOKEN_ADDRESS,
+          symbol: 'sUSDN',
+          project: 'smardex',
+          chain: utils.formatChain(chainString),
+          tvlUsd: totalSupply * susdnPrice,
+          apyBase,
+        };
+      },
+    },
+  ],
 };
 
 const query = gql`
@@ -415,6 +473,46 @@ const main = async (timestamp = null) => {
     .map((i) => i.value)
     .flat()
     .filter(utils.keepFinite);
+};
+
+/**
+ * NOTE:
+ * This method is almost entirely taken from the Ethena adapter (src/adaptors/ethena/index.js)
+ * We need to calculate the APY of sUSDe because sUSDN contains the yield of sUSDe.
+ */
+const sUSDeApy = async (sUSDNPrice) => {
+  const totalSupply =
+    (
+      await sdk.api.abi.call({
+        target: sUSDe,
+        abi: 'erc20:totalSupply',
+      })
+    ).output / 1e18;
+
+  const tvlUsd = totalSupply * sUSDNPrice;
+
+  const currentBlock = await sdk.api.util.getLatestBlock('ethereum');
+  const toBlock = currentBlock.number;
+  const topic =
+    '0xbb28dd7cd6be6f61828ea9158a04c5182c716a946a6d2f31f4864edb87471aa6';
+  const logs = (
+    await sdk.api.util.getLogs({
+      target: '0x9D39A5DE30e57443BfF2A8307A4256c8797A3497',
+      topic: '',
+      toBlock,
+      fromBlock: 19026137,
+      keys: [],
+      topics: [topic],
+      chain: 'ethereum',
+    })
+  ).output.sort((a, b) => b.blockNumber - a.blockNumber);
+
+  // rewards are now beeing streamed every 8hours, which we scale up to a year
+  const rewardsReceived = parseInt(logs[0].data / 1e18);
+  const aprBase = ((rewardsReceived * 3 * 365) / tvlUsd) * 100;
+  // weekly compoounding
+  const apyBase = utils.aprToApy(aprBase, 52);
+  return apyBase;
 };
 
 module.exports = {
