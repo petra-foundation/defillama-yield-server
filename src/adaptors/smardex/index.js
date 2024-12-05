@@ -18,6 +18,9 @@ const SECONDS_IN_DAY = 86400;
 // Smardex gateway for subgraph queries, for each chain
 const ENDPOINT_BASE = 'https://subgraph.smardex.io/defillama';
 
+// Smardex seed USDN token available on Ethereum
+const SUSDN_TOKEN_ADDRESS = '0xf67e2dc041b8a3c39d066037d29f500757b1e886';
+
 const CONFIG = {
   ethereum: {
     ENDPOINT: `${ENDPOINT_BASE}/ethereum`,
@@ -49,7 +52,7 @@ const CONFIG = {
     SDEX_TOKEN_ADDRESS: '0xFd4330b0312fdEEC6d4225075b82E00493FF2e3f',
     FARMING_RANGE_ADDRESS: '0xa5D378c05192E3f1F365D6298921879C4D51c5a3',
     TIME_BETWEEN_BLOCK: 2,
-  }
+  },
 };
 
 const query = gql`
@@ -123,7 +126,7 @@ const getFarmsWithRewards = async (
       abi: farmingRangeABI.find(({ name }) => name === 'campaignInfo'),
       chain: chainString,
       calls: [...Array.from(Array(parseInt(campaignInfoLen, 10)).keys())]
-        .slice(1)
+        .slice(STAKING_ADDRESS ? 1 : 0)
         .map((campaignId) => ({
           target: FARMING_RANGE_ADDRESS,
           params: [campaignId],
@@ -134,7 +137,7 @@ const getFarmsWithRewards = async (
       abi: farmingRangeABI.find(({ name }) => name === 'rewardInfoLen'),
       chain: chainString,
       calls: [...Array.from(Array(parseInt(campaignInfoLen, 10)).keys())]
-        .slice(1)
+        .slice(STAKING_ADDRESS ? 1 : 0)
         .map((campaignId) => ({
           target: FARMING_RANGE_ADDRESS,
           params: [campaignId],
@@ -199,13 +202,42 @@ const getFarmsWithRewards = async (
   return farmsWithRewards;
 };
 
+const applyPoolExceptions = async (
+  chainString,
+  block,
+  farmsWithRewards,
+  sdexPrice,
+  BLOCKS_PER_YEAR,
+  STAKING_ADDRESS
+) => {
+  if (!EXCEPTIONS[chainString]) return [];
+
+  const exceptions = EXCEPTIONS[chainString];
+  const exceptionPools = [];
+
+  for (const exception of exceptions) {
+    const pool = await exception.customHandler({
+      chainString,
+      block,
+      farmsWithRewards,
+      sdexPrice,
+      BLOCKS_PER_YEAR,
+      STAKING_ADDRESS,
+    });
+
+    exceptionPools.push(pool);
+  }
+  return exceptionPools;
+};
+
 // Computes rewards as APY from Farming Campaigns
 const campaignRewardAPY = (
   campaign,
-  pair,
   currentBlockNumber,
+  poolPrice,
   sdexPrice,
-  BLOCKS_PER_YEAR
+  BLOCKS_PER_YEAR,
+  STAKING_ADDRESS
 ) => {
   let apr = 0;
   if (
@@ -215,24 +247,19 @@ const campaignRewardAPY = (
     campaign.rewards.length !== 0 &&
     parseInt(campaign.totalStaked) !== 0
   ) {
-    const pairPrice =
-      parseFloat(pair.totalSupply) > 0
-        ? (parseFloat(pair.reserve0) * pair.price0 +
-            parseFloat(pair.reserve1) * pair.price1) /
-          parseFloat(pair.totalSupply)
-        : 1;
-
     for (let i = 0; i < campaign.rewards.length; i += 1) {
       const reward = campaign.rewards[i];
 
       if (currentBlockNumber < reward.endBlock) {
         const aprBN = reward.rewardPerBlock
-          .mul(parseInt(campaign.id, 10) === 0 ? 1 : WeiPerEther)
+          .mul(
+            parseInt(campaign.id, 10) === 0 && STAKING_ADDRESS ? 1 : WeiPerEther
+          )
           .mul(BLOCKS_PER_YEAR)
           .mul(100)
           .div(campaign.totalStaked);
 
-        apr = (parseFloat(formatEther(aprBN)) * sdexPrice) / pairPrice;
+        apr = (parseFloat(formatEther(aprBN)) * sdexPrice) / poolPrice;
         break;
       }
     }
@@ -258,7 +285,6 @@ const topLvl = async (
   const BLOCKS_PER_YEAR = Math.floor(
     (60 * 60 * 24 * DAYS_IN_YEAR) / TIME_BETWEEN_BLOCK
   );
-
   const currentTimestamp = timestamp || Math.floor(Date.now() / 1000);
   const timestampPrior = currentTimestamp - SECONDS_IN_DAY;
   const timestampPrior7d = currentTimestamp - 7 * SECONDS_IN_DAY;
@@ -290,11 +316,9 @@ const topLvl = async (
     await gqlRequest(url, queryPriorC.replace('<PLACEHOLDER>', blockPrior7d))
   ).pairs;
 
-  // calculate tvl
   dataNow = await utils.tvl(dataNow, chainString);
-  // calculate apy
   dataNow = dataNow.map((el) =>
-    utils.apy({ ...el, feeTier: 500 }, dataPrior, dataPrior7d, version)
+    utils.apy({ ...el, feeTier: 9000 }, dataPrior, dataPrior7d, version)
   );
 
   const prices = (
@@ -302,30 +326,34 @@ const topLvl = async (
       `https://coins.llama.fi/prices/current/${chainString}:${SDEX_TOKEN_ADDRESS}`
     )
   ).coins;
-  const sdexPrice = prices[`${chainString}:${SDEX_TOKEN_ADDRESS}`].price;
-
-  // Get farming campagns for APY rewards
+  const sdexPrice = prices[`${chainString}:${SDEX_TOKEN_ADDRESS}`]?.price || 0;
   const farmsWithRewards = await getFarmsWithRewards(
     chainString,
     STAKING_ADDRESS,
     FARMING_RANGE_ADDRESS
   );
-
-  return dataNow.map((p) => {
+  dataNow = dataNow.map((p) => {
     const symbol = utils.formatSymbol(`${p.token0.symbol}-${p.token1.symbol}`);
     const underlyingTokens = [p.token0.id, p.token1.id];
     const token0 = underlyingTokens === undefined ? '' : underlyingTokens[0];
     const token1 = underlyingTokens === undefined ? '' : underlyingTokens[1];
     const url = `${BASE_URL}/add?tokenA=${token0}&tokenB=${token1}`;
+    const poolPrice =
+      parseFloat(p.totalSupply) > 0
+        ? (parseFloat(p.reserve0) * p.price0 +
+            parseFloat(p.reserve1) * p.price1) /
+          parseFloat(p.totalSupply)
+        : 1;
 
     const apyReward = campaignRewardAPY(
       farmsWithRewards.find(
         (farm) => farm.pairAddress.toLowerCase() === p.id.toLowerCase()
       ),
-      p,
       block,
+      poolPrice,
       sdexPrice,
-      BLOCKS_PER_YEAR
+      BLOCKS_PER_YEAR,
+      STAKING_ADDRESS
     );
 
     return {
@@ -344,6 +372,19 @@ const topLvl = async (
       volumeUsd7d: p.volumeUSD7d,
     };
   });
+
+  // Apply pool exceptions
+  const exceptionPools = await applyPoolExceptions(
+    chainString,
+    block,
+    farmsWithRewards,
+    sdexPrice,
+    BLOCKS_PER_YEAR,
+    STAKING_ADDRESS
+  );
+
+  // Combine data with pool exceptions
+  return [...dataNow, ...exceptionPools];
 };
 
 const main = async (timestamp = null) => {
@@ -354,7 +395,7 @@ const main = async (timestamp = null) => {
   const chains = Object.keys(CONFIG);
 
   // Fetching data for each chain in parallel
-  const resultData = await Promise.all(
+  const resultData = await Promise.allSettled(
     chains.map(async (chain) => {
       const data = await topLvl(
         chain,
@@ -369,7 +410,11 @@ const main = async (timestamp = null) => {
     })
   );
 
-  return resultData.flat().filter(utils.keepFinite);
+  return resultData
+    .filter((i) => i.status === 'fulfilled')
+    .map((i) => i.value)
+    .flat()
+    .filter(utils.keepFinite);
 };
 
 module.exports = {
