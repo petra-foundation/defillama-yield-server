@@ -20,6 +20,7 @@ const ENDPOINT_BASE = 'https://subgraph.smardex.io/defillama';
 
 // Smardex seed USDN token available on Ethereum
 const SUSDN_TOKEN_ADDRESS = '0xf67e2dc041b8a3c39d066037d29f500757b1e886';
+const SUSDE_TOKEN_ADDRESS = '0x9D39A5DE30e57443BfF2A8307A4256c8797A3497';
 
 const CONFIG = {
   ethereum: {
@@ -83,7 +84,6 @@ const EXCEPTIONS = {
               chain: chainString,
             })
           ).output / 1e18;
-
         const rewardApy = campaignRewardAPY(
           farmsWithRewards.find(
             (farm) =>
@@ -96,10 +96,18 @@ const EXCEPTIONS = {
           BLOCKS_PER_YEAR,
           STAKING_ADDRESS
         );
+        console.log(rewardApy);
 
-        const sUSDeApy = await sUSDeApy(susdnPrice);
+        const sUSDeApy = await getsUSDeApy(susdnPrice);
         const apyBase = rewardApy + sUSDeApy;
-
+        console.log({
+          pool: SUSDN_TOKEN_ADDRESS,
+          symbol: 'sUSDN',
+          project: 'smardex',
+          chain: utils.formatChain(chainString),
+          tvlUsd: totalSupply * susdnPrice,
+          apyBase,
+        });
         return {
           pool: SUSDN_TOKEN_ADDRESS,
           symbol: 'sUSDN',
@@ -480,11 +488,11 @@ const main = async (timestamp = null) => {
  * This method is almost entirely taken from the Ethena adapter (src/adaptors/ethena/index.js)
  * We need to calculate the APY of sUSDe because sUSDN contains the yield of sUSDe.
  */
-const sUSDeApy = async (sUSDNPrice) => {
+const getsUSDeApy = async (sUSDNPrice) => {
   const totalSupply =
     (
       await sdk.api.abi.call({
-        target: sUSDe,
+        target: SUSDE_TOKEN_ADDRESS,
         abi: 'erc20:totalSupply',
       })
     ).output / 1e18;
