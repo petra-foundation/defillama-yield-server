@@ -7,6 +7,7 @@ const {
 } = require('ethers');
 const utils = require('../utils');
 const { farmingRangeABI } = require('./abis');
+const { getWstEthPrice } = require('./usdn-utils');
 
 const API_KEY = process.env.SMARDEX_SUBGRAPH_API_KEY;
 
@@ -21,6 +22,8 @@ const ENDPOINT_BASE = 'https://subgraph.smardex.io/defillama';
 // Smardex seed USDN token available on Ethereum
 const SUSDN_TOKEN_ADDRESS = '0xf67e2dc041b8a3c39d066037d29f500757b1e886';
 const SUSDE_TOKEN_ADDRESS = '0x9D39A5DE30e57443BfF2A8307A4256c8797A3497';
+const USDN_TOKEN_ADDRESS = '0xde17a000BA631c5d7c2Bd9FB692EFeA52D90DEE2';
+const WSTETH_TOKEN_ADDRESS = '0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0';
 
 const CONFIG = {
   ethereum: {
@@ -96,24 +99,46 @@ const EXCEPTIONS = {
           BLOCKS_PER_YEAR,
           STAKING_ADDRESS
         );
-        console.log(rewardApy);
 
         const sUSDeApy = await getsUSDeApy(susdnPrice);
         const apyBase = rewardApy + sUSDeApy;
-        console.log({
-          pool: SUSDN_TOKEN_ADDRESS,
-          symbol: 'sUSDN',
-          project: 'smardex',
-          chain: utils.formatChain(chainString),
-          tvlUsd: totalSupply * susdnPrice,
-          apyBase,
-        });
         return {
           pool: SUSDN_TOKEN_ADDRESS,
           symbol: 'sUSDN',
           project: 'smardex',
           chain: utils.formatChain(chainString),
           tvlUsd: totalSupply * susdnPrice,
+          apyBase,
+        };
+      },
+    },
+    {
+      tokenAddress: USDN_TOKEN_ADDRESS,
+      symbol: 'USDN',
+      customHandler: async ({
+        chainString,
+        block,
+        farmsWithRewards,
+        sdexPrice,
+        BLOCKS_PER_YEAR,
+        STAKING_ADDRESS,
+      }) => {
+        const totalSupply =
+          (
+            await sdk.api.abi.call({
+              target: USDN_TOKEN_ADDRESS,
+              abi: 'erc20:totalSupply',
+              chain: chainString,
+            })
+          ).output / 1e18;
+        const wstEthPrice = getWstEthPrice();
+        const apyBase = 0;
+        return {
+          pool: USDN_TOKEN_ADDRESS,
+          symbol: 'USDN',
+          project: 'smardex',
+          chain: utils.formatChain(chainString),
+          tvlUsd: totalSupply,
           apyBase,
         };
       },
