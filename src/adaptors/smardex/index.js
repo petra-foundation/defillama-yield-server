@@ -6,8 +6,7 @@ const {
   BigNumber,
 } = require('ethers');
 const utils = require('../utils');
-const { farmingRangeABI } = require('./abis');
-const { getWstEthPrice } = require('./usdn-utils');
+const { farmingRangeABI, usdnABI, usdnProtocolABI } = require('./abis');
 
 const API_KEY = process.env.SMARDEX_SUBGRAPH_API_KEY;
 
@@ -15,6 +14,7 @@ const BASE_URL = 'https://smardex.io/liquidity';
 const DAYS_IN_YEAR = 365;
 const DAYS_IN_WEEK = 7;
 const SECONDS_IN_DAY = 86400;
+const BIGINT_10_POW_18 = BigInt(10 ** 18);
 
 // Smardex gateway for subgraph queries, for each chain
 const ENDPOINT_BASE = 'https://subgraph.smardex.io/defillama';
@@ -24,6 +24,8 @@ const SUSDN_TOKEN_ADDRESS = '0xf67e2dc041b8a3c39d066037d29f500757b1e886';
 const SUSDE_TOKEN_ADDRESS = '0x9D39A5DE30e57443BfF2A8307A4256c8797A3497';
 const USDN_TOKEN_ADDRESS = '0xde17a000BA631c5d7c2Bd9FB692EFeA52D90DEE2';
 const WSTETH_TOKEN_ADDRESS = '0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0';
+const USDN_PROTOCOL_ADDRESS = '0x656cB8C6d154Aad29d8771384089be5B5141f01a';
+const USDN_PROTOCOL_FIRST_DEPOSIT = 1737570539;
 
 const CONFIG = {
   ethereum: {
@@ -131,8 +133,7 @@ const EXCEPTIONS = {
               chain: chainString,
             })
           ).output / 1e18;
-        const wstEthPrice = getWstEthPrice();
-        const apyBase = 0;
+        const apyBase = await computeUsdnApr();
         return {
           pool: USDN_TOKEN_ADDRESS,
           symbol: 'USDN',
@@ -546,6 +547,98 @@ const getsUSDeApy = async (sUSDNPrice) => {
   // weekly compoounding
   const apyBase = utils.aprToApy(aprBase, 52);
   return apyBase;
+};
+
+async function fetchUSDNData(chain, timestamp) {
+  const [block] = await utils.getBlocksByTime([timestamp], chain);
+
+  const usdnDivisorCall = sdk.api.abi.call({
+    target: USDN_TOKEN_ADDRESS,
+    abi: usdnABI.find((m) => m.name === 'divisor'),
+    chain,
+    block,
+  });
+
+  const usdnTotalSupplyCall = sdk.api.abi.call({
+    target: USDN_TOKEN_ADDRESS,
+    abi: usdnABI.find((m) => m.name === 'totalSupply'),
+    chain,
+    block,
+  });
+
+  const wstEthPrice = await getWstEthPriceAtTimestamp(chain, timestamp);
+  const formattedWstEthPrice = BigInt(Math.round(wstEthPrice * 10 ** 8));
+
+  const usdnVaultAssetAvailableWithFundingCall = sdk.api.abi.call({
+    target: USDN_PROTOCOL_ADDRESS,
+    abi: usdnProtocolABI.find(
+      (m) => m.name === 'vaultAssetAvailableWithFunding'
+    ),
+    chain,
+    block,
+    params: [formattedWstEthPrice, BigInt(timestamp)],
+  });
+
+  const [usdnDivisor, usdnTotalSupply, usdnVaultAssetAvailableWithFunding] =
+    await Promise.all([
+      usdnDivisorCall,
+      usdnTotalSupplyCall,
+      usdnVaultAssetAvailableWithFundingCall,
+    ]);
+
+  return {
+    usdnDivisor: BigInt(usdnDivisor.output),
+    usdnTotalSupply: BigInt(usdnTotalSupply.output),
+    usdnVaultAssetAvailableWithFunding: BigInt(
+      usdnVaultAssetAvailableWithFunding.output
+    ),
+    wstEthPrice: formattedWstEthPrice,
+  };
+}
+
+const getWstEthPriceAtTimestamp = async (chain, timestamp) => {
+  const prices = (
+    await utils.getData(
+      `https://coins.llama.fi/prices/historical/${timestamp}/${chain}:${WSTETH_TOKEN_ADDRESS}`
+    )
+  ).coins;
+  console.log(prices);
+  const wstETHResult = prices[`${chain}:${WSTETH_TOKEN_ADDRESS}`];
+  if (wstETHResult === undefined) {
+    throw new Error('No price data found');
+  }
+  return wstETHResult.price;
+};
+
+const computeUsdnApr = async (chain = 'ethereum') => {
+  const timestampNow = Math.floor(Date.now() / 1_000);
+  const timestampOneYearAgo = Math.max(
+    timestampNow - 24 * 60 * 60 * 365,
+    USDN_PROTOCOL_FIRST_DEPOSIT
+  );
+  console.log('timestampNow', timestampNow);
+  console.log('timestampOneYearAgo', timestampOneYearAgo);
+
+  const [first, last] = await Promise.all([
+    fetchUSDNData(chain, timestampOneYearAgo),
+    fetchUSDNData(chain, timestampNow),
+  ]);
+
+  const apr =
+    (((first.usdnDivisor *
+      first.usdnTotalSupply *
+      last.usdnVaultAssetAvailableWithFunding *
+      last.wstEthPrice *
+      BIGINT_10_POW_18) /
+      (last.usdnDivisor *
+        last.usdnTotalSupply *
+        first.usdnVaultAssetAvailableWithFunding *
+        first.wstEthPrice) -
+      BIGINT_10_POW_18) *
+      BigInt(DAYS_IN_YEAR)) /
+    (BigInt(timestampNow) - BigInt(timestampOneYearAgo));
+
+  return Number(formatEther(apr));
 };
 
 module.exports = {
