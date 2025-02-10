@@ -616,8 +616,6 @@ const computeUsdnApr = async (chain = 'ethereum') => {
     timestampNow - 24 * 60 * 60 * 365,
     USDN_PROTOCOL_FIRST_DEPOSIT
   );
-  console.log('timestampNow', timestampNow);
-  console.log('timestampOneYearAgo', timestampOneYearAgo);
 
   const [first, last] = await Promise.all([
     fetchUSDNData(chain, timestampOneYearAgo),
