@@ -141,7 +141,6 @@ const EXCEPTIONS = {
             })
           ).output / 1e18;
         const apyBase = await computeUsdnApr();
-        console.log('apyBase: ', apyBase);
         return {
           pool: USDN_TOKEN_ADDRESS,
           symbol: 'USDN',
